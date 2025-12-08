@@ -1,20 +1,23 @@
-import { useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useSocket } from './hooks/useSocket';
-import { RoleSelector } from './components/RoleSelector';
-import { HostPlayer } from './components/HostPlayer';
-import { GuestRemote } from './components/GuestRemote';
+import { RoleSelectorPage } from './pages/RoleSelectorPage';
+import { HostPage } from './pages/HostPage';
+import { GuestPage } from './pages/GuestPage';
+import { ChakraProvider } from '@chakra-ui/react'
 
 export default function App() {
-  const [role, setRole] = useState<'host' | 'guest' | null>(null);
-  
-  // 自作フックを使ってsocket接続を管理
   const socket = useSocket();
 
-  if (!role) {
-    return <RoleSelector onSelectRole={setRole} />;
-  }
-
-  return role === 'host' 
-    ? <HostPlayer socket={socket} /> 
-    : <GuestRemote socket={socket} />;
+  return (
+    <ChakraProvider>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<RoleSelectorPage />} />
+        <Route path="/host" element={<HostPage socket={socket} />} />
+        <Route path="/guest" element={<GuestPage socket={socket} />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+    </ChakraProvider>
+  );
 }
