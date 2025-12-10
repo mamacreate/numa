@@ -13,7 +13,7 @@ export const RoleSelectorPage = () => {
           
           {/* タイトルエリア */}
           <VStack spacing={2}>
-            <Text fontSize="sm" letterSpacing="0.5em" color="cyan.500" fontWeight="bold">CONNECTED AUDIO SYSTEM</Text>
+            <Text fontSize="sm" letterSpacing="0.5em" color="cyan.500" fontWeight="bold">オーディオシステム</Text>
             <Heading 
               size="4xl" 
               color="white" 
@@ -21,9 +21,9 @@ export const RoleSelectorPage = () => {
               letterSpacing="tight"
               sx={{ textShadow: "0 0 20px rgba(0, 255, 255, 0.6), 0 0 40px rgba(0, 255, 255, 0.3)" }}
             >
-              NIGHT SYNC
+              沼プロジェクト
             </Heading>
-            <Text color="gray.400">Select your interface to begin</Text>
+            <Text color="gray.400">デバイスを選んでください</Text>
           </VStack>
           
           {/* ボタンエリア */}
@@ -31,7 +31,7 @@ export const RoleSelectorPage = () => {
             {/* PC側ボタン */}
             <RoleButton 
               icon={PcIcon} 
-              title="HOST PLAYER" 
+              title="HOST" 
               sub="PC / Main Audio" 
               accentColor="cyan" 
               onClick={() => navigate('/host')} 
