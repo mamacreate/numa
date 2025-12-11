@@ -1,114 +1,158 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { 
-  Box, Container, Heading, VStack, HStack, Badge, useToast, Text, Spinner, Icon
+  Box, Container, VStack, HStack, Text, Spinner, Icon, 
+  Button, Flex, Badge 
 } from '@chakra-ui/react';
 import { Socket } from 'socket.io-client';
-import { GuestSongItem } from '../components/guest/GuestSongItem';
-import { MdMusicNote, MdExpandMore } from 'react-icons/md';
+import { MdPlayArrow, MdExpandMore, MdPerson, MdChevronLeft, MdChevronRight } from 'react-icons/md';
+
+// 分割した部品をインポート
+import { GuestHeader, FILTER_TABS } from '../components/guest/GuestHeader';
+import { GuestSongRow } from '../components/guest/GuestSongRow';
 
 type Props = { socket: Socket | null };
 
-export const GuestPage = ({ socket }: Props) => {
-  const toast = useToast();
-  const [songs, setSongs] = useState<string[]>([]);
-  const [activeSong, setActiveSong] = useState<string | null>(null);
-  const [displayCount, setDisplayCount] = useState(50);
-  const observerTarget = useRef(null);
+type SongInfo = { originalName: string; title: string; };
+type GroupedSongs = { [artist: string]: SongInfo[]; };
 
+const ITEMS_PER_PAGE = 30;
+
+export const GuestPage = ({ socket }: Props) => {
+  const [songs, setSongs] = useState<string[]>([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedFilter, setSelectedFilter] = useState('ALL');
+  const [currentPage, setCurrentPage] = useState(1);
+  
+  // UI状態
+  const [expandedArtist, setExpandedArtist] = useState<string | null>(null);
+  const [activeSong, setActiveSong] = useState<string | null>(null);
+
+  // ソケット受信
   useEffect(() => {
     if (!socket) return;
-    socket.on('update_song_list', (songList: string[]) => {
-      setSongs(songList);
-    });
+    socket.on('update_song_list', setSongs);
     return () => { socket.off('update_song_list'); };
   }, [socket]);
 
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          setDisplayCount((prev) => prev + 50);
-        }
-      }, { threshold: 1.0 }
-    );
-    if (observerTarget.current) observer.observe(observerTarget.current);
-    return () => { if (observerTarget.current) observer.unobserve(observerTarget.current); };
+  // データ変換: アーティスト別にグループ化
+  const { groupedSongs, artistNames } = useMemo(() => {
+    const groups: GroupedSongs = {};
+    songs.forEach(fileName => {
+      const cleanName = fileName.replace(/^\d+[\s_]+/, '').replace(/\.[^/.]+$/, '');
+      const parts = cleanName.split(' - ');
+      
+      // アーティスト名と曲名を分離
+      const artist = parts.length >= 2 ? parts[0].trim() : "Unknown Artist";
+      const title = parts.length >= 2 ? parts[1].trim() : cleanName;
+
+      if (!groups[artist]) groups[artist] = [];
+      groups[artist].push({ originalName: fileName, title });
+    });
+    
+    // あいうえお順ソート
+    const sortedArtists = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'ja'));
+    return { groupedSongs: groups, artistNames: sortedArtists };
   }, [songs]);
 
-  const handleRequest = useCallback((data: { title: string; start: number; end: number }) => {
-    if (!socket) {
-      toast({ status: 'error', title: '接続されていません' });
-      return;
+  // フィルタリング処理
+  const filteredArtists = useMemo(() => {
+    let result = artistNames;
+    if (selectedFilter !== 'ALL') {
+      const config = FILTER_TABS.find(f => f.label === selectedFilter);
+      if (config?.regex) result = result.filter(name => config.regex?.test(name.charAt(0)));
     }
-    socket.emit('request_song', data);
-    toast({ title: "リクエスト完了", status: "success", duration: 3000, position: "top" });
-  }, [socket, toast]);
+    if (searchTerm) {
+      const lower = searchTerm.toLowerCase();
+      result = result.filter(name => name.toLowerCase().includes(lower));
+    }
+    return result;
+  }, [artistNames, searchTerm, selectedFilter]);
 
-  // ★追加: 表示用の名前変換関数
-  const formatTitle = (fileName: string) => {
-    return fileName.replace(/^\d+\s+/, '').replace(/\.[^/.]+$/, '');
-  };
+  // ページネーション計算
+  const totalPages = Math.ceil(filteredArtists.length / ITEMS_PER_PAGE) || 1;
+  const currentArtists = filteredArtists.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
 
-  const visibleSongs = songs.slice(0, displayCount);
+  // 検索条件変更時にリセット
+  useEffect(() => {
+    setCurrentPage(1);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [searchTerm, selectedFilter]);
+
+  // ページ切り替え時にトップへ
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [currentPage]);
 
   return (
     <Box minH="100vh" bg="black" color="white" pb={40}>
-      <Box position="sticky" top="0" zIndex="sticky" bg="rgba(0,0,0,0.9)" backdropFilter="blur(10px)" borderBottom="1px solid" borderColor="whiteAlpha.200" py={4}>
-         <Container maxW="container.sm">
-            <HStack justify="space-between" align="center">
-              <VStack align="start" spacing={0}>
-                <Heading size="md" color="pink.400" fontWeight="900" letterSpacing="wider">REMOTE</Heading>
-                <Text fontSize="xx-small" color="gray.400">STATUS: {socket?.connected ? 'ONLINE' : 'OFFLINE'}</Text>
-              </VStack>
-              <Badge variant="solid" colorScheme="pink" borderRadius="full" px={3}>{songs.length} TRACKS</Badge>
-            </HStack>
-         </Container>
-      </Box>
       
+      {/* ヘッダー部品 */}
+      <GuestHeader 
+        totalSongs={artistNames.length}
+        filteredCount={filteredArtists.length}
+        searchTerm={searchTerm}
+        setSearchTerm={setSearchTerm}
+        selectedFilter={selectedFilter}
+        setSelectedFilter={setSelectedFilter}
+      />
+
+      {/* アーティストリスト */}
       <Container maxW="container.sm" px={0}>
-        <VStack spacing={0} align="stretch">
-          {songs.length === 0 ? (
-            <Box py={20} textAlign="center" color="gray.500"><Spinner color="pink.500" mb={4} /><Text>Loading music...</Text></Box>
-          ) : (
-            <>
-              {visibleSongs.map((songName) => (
-                <Box key={songName}>
-                  {activeSong === songName ? (
-                    <GuestSongItem 
-                      song={songName}
-                      onRequest={handleRequest}
-                      onClose={() => setActiveSong(null)}
-                    />
-                  ) : (
-                    <Box 
-                      bg="transparent" 
-                      p={4} 
-                      borderBottom="1px solid" borderColor="whiteAlpha.100"
-                      cursor="pointer"
-                      onClick={() => setActiveSong(songName)}
-                      _active={{ bg: "whiteAlpha.100" }}
-                    >
-                      <HStack justify="space-between">
-                        <HStack>
-                          <Icon as={MdMusicNote} color="gray.600" />
-                          {/* ★修正: formatTitleを通して表示 */}
-                          <Text fontWeight="bold" noOfLines={1} fontSize="md">
-                            {formatTitle(songName)}
-                          </Text>
-                        </HStack>
-                        <Icon as={MdExpandMore} color="gray.600" />
-                      </HStack>
+        {songs.length === 0 ? (
+          <Box py={20} textAlign="center" color="gray.500"><Spinner color="pink.500" mb={4} /><Text>Loading...</Text></Box>
+        ) : (
+          <VStack spacing={0} align="stretch">
+            {currentArtists.map((artist) => {
+              const isExpanded = expandedArtist === artist;
+              return (
+                <Box key={artist} borderBottom="1px solid" borderColor="whiteAlpha.100">
+                  {/* アーティスト行 */}
+                  <HStack 
+                    p={4} 
+                    bg={isExpanded ? "gray.800" : "transparent"}
+                    cursor="pointer"
+                    onClick={() => setExpandedArtist(isExpanded ? null : artist)}
+                    justify="space-between"
+                    _hover={{ bg: "whiteAlpha.50" }}
+                  >
+                    <HStack>
+                      <Icon as={MdPerson} color={isExpanded ? "pink.400" : "gray.500"} boxSize={5} />
+                      <Text fontWeight="bold" fontSize="lg" color={isExpanded ? "pink.200" : "white"}>{artist}</Text>
+                      <Badge colorScheme="gray" fontSize="xs" ml={2}>{groupedSongs[artist].length}</Badge>
+                    </HStack>
+                    <Icon as={isExpanded ? MdExpandMore : MdPlayArrow} transform={isExpanded ? "rotate(180deg)" : ""} color="gray.500" transition="transform 0.2s" />
+                  </HStack>
+
+                  {/* 曲リスト展開 (ここも切り出せるが、ループ処理なのでここに記述) */}
+                  {isExpanded && (
+                    <Box bg="blackAlpha.400">
+                      {groupedSongs[artist].map((song) => (
+                        <GuestSongRow
+                          key={song.originalName}
+                          originalName={song.originalName}
+                          title={song.title}
+                          isActive={activeSong === song.originalName}
+                          onSelect={() => setActiveSong(song.originalName)}
+                          onClose={() => setActiveSong(null)}
+                          socket={socket}
+                        />
+                      ))}
                     </Box>
                   )}
                 </Box>
-              ))}
-              
-              {visibleSongs.length < songs.length && (
-                <Box ref={observerTarget} py={4} textAlign="center"><Spinner size="xs" color="gray.600" /></Box>
-              )}
-            </>
-          )}
-        </VStack>
+              );
+            })}
+          </VStack>
+        )}
+
+        {/* ページネーション */}
+        {filteredArtists.length > ITEMS_PER_PAGE && (
+          <Flex justify="center" align="center" py={8} gap={6}>
+            <Button onClick={() => setCurrentPage(p => p - 1)} isDisabled={currentPage === 1} colorScheme="pink" variant="outline" leftIcon={<MdChevronLeft />}>PREV</Button>
+            <Text fontWeight="bold" color="gray.400">{currentPage} / {totalPages}</Text>
+            <Button onClick={() => setCurrentPage(p => p + 1)} isDisabled={currentPage === totalPages} colorScheme="pink" variant="outline" rightIcon={<MdChevronRight />}>NEXT</Button>
+          </Flex>
+        )}
       </Container>
     </Box>
   );
