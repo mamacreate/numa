@@ -28,8 +28,5 @@ public/music/*
 public/Best_Mix_Numbered/*
 public/processed/*
 
-# Python datas
-Python/data/*
-
 # 仮装環境ファイル
 Python/venv/*
