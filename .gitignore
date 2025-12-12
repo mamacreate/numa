@@ -25,3 +25,5 @@ dist-ssr
 
 # Music files
 public/music/*
+public/Best_Mix_Numbered/*
+public/processed/*
