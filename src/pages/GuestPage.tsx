@@ -5,6 +5,7 @@ import {
 } from '@chakra-ui/react';
 import { Socket } from 'socket.io-client';
 import { MdPlayArrow, MdExpandMore, MdPerson, MdChevronLeft, MdChevronRight } from 'react-icons/md';
+import { TutorialModal } from '../components/guest/TutorialModal';
 
 // 分割した部品をインポート
 import { GuestHeader, FILTER_TABS } from '../components/guest/GuestHeader';
@@ -154,6 +155,7 @@ export const GuestPage = ({ socket }: Props) => {
           </Flex>
         )}
       </Container>
+      <TutorialModal />
     </Box>
   );
 };
