@@ -30,3 +30,6 @@ public/processed/*
 
 # Python datas
 Python/data/*
+
+# 仮装環境ファイル
+Python/venv/*
