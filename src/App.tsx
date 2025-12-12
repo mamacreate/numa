@@ -1,23 +1,37 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useSocket } from './hooks/useSocket';
-import { RoleSelectorPage } from './pages/RoleSelectorPage';
-import { HostPage } from './pages/HostPage';
+import { useEffect, useState } from 'react';
+import { ChakraProvider, Box, Text, Spinner, Center } from '@chakra-ui/react';
+import { io, Socket } from 'socket.io-client';
 import { GuestPage } from './pages/GuestPage';
-import { ChakraProvider } from '@chakra-ui/react'
 
-export default function App() {
-  const socket = useSocket();
+function App() {
+  const [socket, setSocket] = useState<Socket | null>(null);
+
+  useEffect(() => {
+    // サーバーへの接続
+    const newSocket = io(); 
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.close();
+    };
+  }, []);
 
   return (
     <ChakraProvider>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<RoleSelectorPage />} />
-        <Route path="/host" element={<HostPage socket={socket} />} />
-        <Route path="/guest" element={<GuestPage socket={socket} />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+      <Box minH="100vh" bg="black">
+        {socket ? (
+          // ルーティングを廃止し、直接 GuestPage を表示
+          <GuestPage socket={socket} />
+        ) : (
+          // 接続待ちのローディング画面
+          <Center h="100vh">
+             <Spinner color="pink.500" size="xl" />
+             <Text color="white" ml={4}>Connecting to System...</Text>
+          </Center>
+        )}
+      </Box>
     </ChakraProvider>
   );
 }
+
+export default App;
