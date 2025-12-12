@@ -3,12 +3,44 @@ import { spawn } from 'child_process';
 import path from 'path';
 import { CONFIG } from './config.js';
 
+// JSONファイルのパス設定
+const REQUEST_FILE_DIR = path.join(process.cwd(), 'python/data');
+const REQUEST_FILE_PATH = path.join(REQUEST_FILE_DIR, 'requests.json');
+
+// ★修正: シンプルな文字列リストとして保存する関数
+const saveRequestToJSON = (title) => {
+    try {
+        // 1. フォルダがなければ作る
+        if (!fs.existsSync(REQUEST_FILE_DIR)) {
+            fs.mkdirSync(REQUEST_FILE_DIR, { recursive: true });
+        }
+
+        // 2. ファイルを読み込む
+        let jsonData = { requests: [] };
+        if (fs.existsSync(REQUEST_FILE_PATH)) {
+            const fileContent = fs.readFileSync(REQUEST_FILE_PATH, 'utf-8');
+            if (fileContent.trim()) {
+                jsonData = JSON.parse(fileContent);
+            }
+        }
+
+        // 3. ★ここを変更: オブジェクトではなく「曲名の文字列」をそのまま追加
+        jsonData.requests.push(title);
+
+        // 4. 書き込み
+        fs.writeFileSync(REQUEST_FILE_PATH, JSON.stringify(jsonData, null, 2));
+        console.log(`[Saved] Added to list: ${title}`);
+
+    } catch (err) {
+        console.error("[JSON Error] Failed to save request:", err);
+    }
+};
+
 // Pythonプロセス管理
 let pythonProcess = null;
 
 const startPythonDJ = () => {
     if (pythonProcess) return;
-    // バックエンド担当じゃないとのことなので、もしファイルがなくてもエラーで落ちないようにしています
     const scriptPath = path.join(CONFIG.ROOT_DIR, 'python', 'dj_player.py');
     
     if (fs.existsSync(scriptPath)) {
@@ -24,7 +56,6 @@ const startPythonDJ = () => {
 };
 
 export const setupSocket = (io) => {
-    // サーバー起動時にPythonも道連れで起動（あれば）
     startPythonDJ();
 
     io.on('connection', (socket) => {
@@ -38,10 +69,14 @@ export const setupSocket = (io) => {
         socket.emit('update_song_list', files);
       }
   
-      // リクエスト受信 -> Pythonへ命令
+      // リクエスト受信
       socket.on('request_song', (data) => {
         console.log(`[Request] ${data.title}`);
         
+        // JSONに保存
+        saveRequestToJSON(data.title);
+
+        // Pythonへ命令
         if (pythonProcess) {
             const payload = {
                 title: data.title,
@@ -50,7 +85,6 @@ export const setupSocket = (io) => {
             };
             pythonProcess.stdin.write(JSON.stringify(payload) + "\n");
         } else {
-            // Pythonが動いていない場合は再起動を試みるか、ログだけ出す
             startPythonDJ(); 
         }
       });
