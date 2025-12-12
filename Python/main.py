@@ -1,39 +1,57 @@
 import os
-import threading
 import time
 import random
+import datetime
+import json
+import threading
 
-from pydub import AudioSegment
-from pydub.playback import play
-from queue import Queue
-
-import shutil
 import librosa
 import numpy as np
-from tqdm import tqdm
+import mpv
 
-# ==========================================
-# 設定エリア
-# ==========================================
+# ============================================================
+#  パス設定
+# ============================================================
 
-# 対象の楽曲フォルダ
-FOLDER_PATH = "../public/music"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PUBLIC_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "public"))
+MUSIC_FOLDER = os.path.join(PUBLIC_DIR, "music")
 
-# 出力フォルダ名（プレイリスト管理フォルダ）
-OUTPUT_FOLDER_NAME = "Best_Mix_Numbered"
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# BPMの許容誤差
-BPM_TOLERANCE = 0.10
+ANALYSIS_JSON = os.path.join(DATA_DIR, "analysis_results.json")
+REQUEST_JSON = os.path.join(DATA_DIR, "requests.json")
 
-# プレイリスト生成間隔（秒）
-PLAYLIST_INTERVAL = 60  # ★60秒ごとにプレイリスト作成
+PLAYLIST_HISTORY_DIR = os.path.join(DATA_DIR, "playlist_history")
+os.makedirs(PLAYLIST_HISTORY_DIR, exist_ok=True)
 
-# ★基準フォルダ（曲フォルダ）の1つ上の階層
-BASE_OUTPUT_DIR = os.path.dirname(FOLDER_PATH)
+# ============================================================
+#  DJ パラメータ（安定版）
+# ============================================================
 
-# ==========================================
-# キャメロットホイールマップ
-# ==========================================
+CROSSFADE_TIME = 3.0    # クロスフェード時間（固定）
+PRELOAD_MARGIN = 3.0    # ★ フェード開始より何秒早く次曲をロードするか（音量0で先読み）
+FADE_STEPS = 60
+
+BPM_TOLERANCE = 0.10    # プレイリスト並び替え用（再生速度には使わない）
+
+# ============================================================
+#  Track クラス
+# ============================================================
+
+class Track:
+    def __init__(self, filepath, bpm=0.0, camelot="00X", duration=0.0):
+        self.filepath = filepath
+        self.filename = os.path.basename(filepath)
+        self.bpm = bpm
+        self.camelot = camelot
+        self.duration = duration
+
+# ============================================================
+#  Camelot マップ
+# ============================================================
+
 CAMELOT_MAP = {
     ('B', 'major'): '01B',  ('G#', 'minor'): '01A',
     ('F#', 'major'): '02B', ('D#', 'minor'): '02A', ('Gb', 'major'): '02B', ('Eb', 'minor'): '02A',
@@ -44,283 +62,340 @@ CAMELOT_MAP = {
     ('F', 'major'): '07B',  ('D', 'minor'): '07A',
     ('C', 'major'): '08B',  ('A', 'minor'): '08A',
     ('G', 'major'): '09B',  ('E', 'minor'): '09A',
-    ('D', 'major'): '10B', ('B', 'minor'): '10A',
-    ('A', 'major'): '11B', ('F#', 'minor'): '11A', ('Gb', 'minor'): '11A',
-    ('E', 'major'): '12B', ('C#', 'minor'): '12A', ('Db', 'minor'): '12A'
+    ('D', 'major'): '10B',  ('B', 'minor'): '10A',
+    ('A', 'major'): '11B',  ('F#', 'minor'): '11A',
+    ('E', 'major'): '12B',  ('C#', 'minor'): '12A'
 }
 
-class Track:
-    def __init__(self, filepath):
-        self.filepath = filepath
-        self.filename = os.path.basename(filepath)
-        self.bpm = 0
-        self.camelot = "00X"
+# ============================================================
+#  JSON リクエスト管理
+# ============================================================
 
+request_lock = threading.Lock()
 
-# ==========================================
-# キー解析
-# ==========================================
+def load_requests():
+    if not os.path.exists(REQUEST_JSON):
+        return []
+    try:
+        with open(REQUEST_JSON, "r", encoding="utf-8") as f:
+            return json.load(f).get("requests", [])
+    except Exception:
+        return []
+
+def save_requests(req_list):
+    with open(REQUEST_JSON, "w", encoding="utf-8") as f:
+        json.dump({"requests": req_list}, f, indent=2, ensure_ascii=False)
+
+def pop_request():
+    with request_lock:
+        lst = load_requests()
+        if not lst:
+            return None
+        v = lst.pop(0)
+        save_requests(lst)
+        return v
+
+def add_request_to_json(filename):
+    with request_lock:
+        lst = load_requests()
+        lst.append(filename)
+        save_requests(lst)
+
+# ============================================================
+#  CLI リクエスト受付
+# ============================================================
+
+def cli_request_loop(tracks):
+    print("\n💡 曲名を入力すると次曲としてリクエストされます")
+    print("   例: songA.wav（public/music に存在する必要あり）")
+    print("   Ctrl+C で CLI 入力のみ終了します\n")
+
+    names = [t.filename for t in tracks]
+
+    while True:
+        try:
+            name = input("🎧 リクエスト曲ファイル名 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCLIリクエスト受付を終了しました")
+            break
+
+        if not name:
+            continue
+
+        if name not in names:
+            print("⚠ その曲は解析済みリストに存在しません")
+            continue
+
+        add_request_to_json(name)
+        print(f"✅ リクエスト追加: {name}")
+
+# ============================================================
+#  Key 推定
+# ============================================================
+
 def estimate_key(y, sr):
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     chroma_mean = np.mean(chroma, axis=1)
 
-    major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19,
-                              2.39, 3.66, 2.29, 2.88])
-    minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75,
-                              3.98, 2.69, 3.34, 3.17])
+    major_profile = np.array([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88])
+    minor_profile = np.array([6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17])
+
+    pitch_class = ['C','C#','D','Eb','E','F','F#','G','Ab','A','Bb','B']
 
     max_score = -1
     best_key = 0
     best_mode = 'major'
-    pitch_class = ['C', 'C#', 'D', 'Eb', 'E', 'F',
-                   'F#', 'G', 'Ab', 'A', 'Bb', 'B']
 
     for i in range(12):
-        score_maj = np.corrcoef(chroma_mean, np.roll(major_profile, i))[0, 1]
-        if score_maj > max_score:
-            max_score = score_maj
-            best_key = i
-            best_mode = 'major'
-
-        score_min = np.corrcoef(chroma_mean, np.roll(minor_profile, i))[0, 1]
-        if score_min > max_score:
-            max_score = score_min
-            best_key = i
-            best_mode = 'minor'
+        s1 = np.corrcoef(chroma_mean, np.roll(major_profile, i))[0,1]
+        s2 = np.corrcoef(chroma_mean, np.roll(minor_profile, i))[0,1]
+        if s1 > max_score:
+            max_score, best_key, best_mode = s1, i, 'major'
+        if s2 > max_score:
+            max_score, best_key, best_mode = s2, i, 'minor'
 
     return pitch_class[best_key], best_mode
 
-
-def get_camelot_number(camelot_code):
-    if camelot_code == "00X":
+def get_camelot_number(code):
+    if code == "00X":
         return -99
-    return int(''.join(filter(str.isdigit, camelot_code)))
+    return int(''.join(filter(str.isdigit, code)))
 
-
-def is_harmonic(current_cam, candidate_cam):
-    if current_cam == "00X" or candidate_cam == "00X":
+def is_harmonic(a, b):
+    if a == "00X" or b == "00X":
         return False
-    curr_num = get_camelot_number(current_cam)
-    cand_num = get_camelot_number(candidate_cam)
-    curr_letter = current_cam[-1]
-    cand_letter = candidate_cam[-1]
-
-    if current_cam == candidate_cam:
+    na, la = get_camelot_number(a), a[-1]
+    nb, lb = get_camelot_number(b), b[-1]
+    if a == b:
         return True
-    if curr_num == cand_num and curr_letter != cand_letter:
+    if na == nb and la != lb:
         return True
+    diff = abs(na - nb)
+    return la == lb and (diff == 1 or diff == 11)
 
-    diff = abs(curr_num - cand_num)
-    if curr_letter == cand_letter and (diff == 1 or diff == 11):
-        return True
+# ============================================================
+#  楽曲解析
+# ============================================================
 
-    return False
+def analyze_single_track(folder, filename):
+    path = os.path.join(folder, filename)
+    try:
+        duration = librosa.get_duration(path=path)
+        offset = max(0, (duration - 60) / 2)
+        y, sr = librosa.load(path, sr=22050, offset=offset, duration=60)
 
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        bpm = float(tempo[0] if isinstance(tempo, np.ndarray) else tempo)
 
-# ==========================================
-# 曲解析（初回のみ）
-# ==========================================
-def analyze_tracks(folder):
+        key, mode = estimate_key(y, sr)
+        if key == "C#": key = "Db"
+        if key == "D#": key = "Eb"
+        camelot = CAMELOT_MAP.get((key, mode), "00X")
+
+        print(f"解析OK: {filename} BPM:{bpm:.1f} Key:{camelot}")
+        return {"bpm": bpm, "camelot": camelot, "duration": duration}
+    except Exception as e:
+        print(f"解析失敗: {filename} ({e})")
+        return None
+
+def load_analysis_cache():
+    if not os.path.exists(ANALYSIS_JSON):
+        return {}
+    try:
+        with open(ANALYSIS_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_analysis_cache(cache):
+    with open(ANALYSIS_JSON, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(cache.items())), f, indent=2, ensure_ascii=False)
+
+def analyze_tracks_with_cache(music_folder):
+    files = sorted(f for f in os.listdir(music_folder) if f.lower().endswith(".wav"))
+    cache = load_analysis_cache()
+
+    for fn in files:
+        if fn not in cache:
+            info = analyze_single_track(music_folder, fn)
+            if info:
+                cache[fn] = info
+
+    for fn in list(cache.keys()):
+        if fn not in files:
+            cache.pop(fn)
+
+    save_analysis_cache(cache)
+
     tracks = []
-    if not os.path.exists(folder):
-        print(f"エラー: フォルダが見つかりません: {folder}")
-        return []
-
-    files = [f for f in os.listdir(folder)
-             if f.lower().endswith('.wav')]
-
-    print(f"フォルダ '{folder}' 内の {len(files)} 曲を解析中...")
-    for f in tqdm(files):
-        path = os.path.join(folder, f)
-        track = Track(path)
-
-        try:
-            duration = librosa.get_duration(path=path)
-            offset = max(0, (duration - 60) / 2)
-            y, sr = librosa.load(path, sr=22050, offset=offset, duration=60)
-
-            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            track.bpm = tempo[0] if isinstance(tempo, np.ndarray) else tempo
-
-            key, mode = estimate_key(y, sr)
-            if key == 'C#': key = 'Db'
-            elif key == 'D#': key = 'Eb'
-
-            track.camelot = CAMELOT_MAP.get((key, mode), "00X")
-            tracks.append(track)
-
-        except Exception:
-            print(f"解析失敗: {f}")
-
+    for fn, info in cache.items():
+        tracks.append(
+            Track(
+                filepath=os.path.join(music_folder, fn),
+                bpm=info["bpm"],
+                camelot=info["camelot"],
+                duration=info["duration"]
+            )
+        )
     return tracks
 
+# ============================================================
+#  プレイリスト生成
+# ============================================================
 
-# ==========================================
-# 最初の曲をランダムに選ぶ
-# ==========================================
-def find_start_track(tracks):
-    selected = random.choice(tracks)
-    print(f">> ランダム選曲: {selected.filename} (BPM:{selected.bpm:.0f}, Key:{selected.camelot})")
-    return selected
-
-
-# ==========================================
-# プレイリスト生成
-# ==========================================
 def sort_playlist(tracks, start_track):
     remaining = tracks.copy()
-    if start_track in remaining:
-        remaining.remove(start_track)
-
+    remaining.remove(start_track)
     playlist = [start_track]
 
     while remaining:
         last = playlist[-1]
-        best_match = None
-        best_score = float('inf')
+        best, best_score = None, 9999
 
-        candidates = [
-            t for t in remaining
-            if abs(t.bpm - last.bpm) / last.bpm <= BPM_TOLERANCE
-        ]
-        if not candidates:
-            candidates = remaining
-
-        for t in candidates:
+        for t in remaining:
             score = abs(t.bpm - last.bpm)
             if is_harmonic(last.camelot, t.camelot):
                 score -= 50
             if score < best_score:
-                best_score = score
-                best_match = t
+                best, best_score = t, score
 
-        playlist.append(best_match)
-        remaining.remove(best_match)
+        playlist.append(best)
+        remaining.remove(best)
 
     return playlist
 
+def save_playlist(playlist):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(PLAYLIST_HISTORY_DIR, f"playlist_{ts}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        for i, t in enumerate(playlist, 1):
+            f.write(f"{i:02d}: {t.filename}\n")
 
-# ==========================================
-# 上位5曲のみを保存（基準の1つ上に）
-# ==========================================
-def export_results_numbered(sorted_tracks, source_folder):
+# ============================================================
+#  クロスフェード（音量のみ・固定秒）
+# ============================================================
 
-    export_root = os.path.join(BASE_OUTPUT_DIR, OUTPUT_FOLDER_NAME)
-    os.makedirs(export_root, exist_ok=True)
+def crossfade_simple(a, b, time_cf, steps):
+    for i in range(steps + 1):
+        t = i / steps
+        a.volume = 100 * (1 - t)
+        b.volume = 100 * t
+        time.sleep(time_cf / steps)
 
-    existing = [
-        f for f in os.listdir(export_root)
-        if os.path.isdir(os.path.join(export_root, f)) and f.isdigit()
-    ]
+# ============================================================
+#  DJ ミックス本体（改善版：ロードとフェードを分離、1曲につき1回だけ実行）
+# ============================================================
 
-    next_index = max(map(int, existing)) + 1 if existing else 1
+def find_track_by_name(name, tracks):
+    for t in tracks:
+        if t.filename == name:
+            return t
+    return None
 
-    folder_name = f"{next_index:02d}"
-    export_path = os.path.join(export_root, folder_name)
-    os.makedirs(export_path, exist_ok=True)
+def dj_mix_mpv(playlist, tracks):
+    deck_a = mpv.MPV()
+    deck_b = mpv.MPV()
 
-    limited_tracks = sorted_tracks[:5]
-    digit_len = len(str(len(limited_tracks)))
+    deck_a.volume = 100
+    deck_b.volume = 0
 
-    print(f"\n保存先：{export_path}")
+    current_p, next_p = deck_a, deck_b
 
-    for i, track in enumerate(limited_tracks):
-        new_filename = f"{i+1:0{digit_len}d}_" + track.filename
-        shutil.copy2(track.filepath, os.path.join(export_path, new_filename))
+    current = playlist[0]
+    index = 0
 
-    print("保存完了！")
+    next_track = None
+    next_loaded = False  # ★ 次曲をロード済みか（ロードは1回だけ）
+    fading = False       # ★ フェード中ガード（多重発火防止）
 
-
-# ==========================================
-# 再生スレッド
-# ==========================================
-def play_music(play_queue):
-    while True:
-        file_to_play = play_queue.get()
-        print(f"再生開始：{file_to_play}")
-        os.system(f'ffplay -nodisp -autoexit "{file_to_play}"')
-        print(f"再生終了：{file_to_play}")
-
-
-
-# ==========================================
-# ミックス生成スレッド
-# ==========================================
-def make_mix(input_dir, output_dir, play_queue):
-    CROSSFADE = 5000  # 5秒
-    processed_folders = set()
+    print(f"▶ 再生開始: {current.filename}")
+    current_p.play(current.filepath)
 
     while True:
-        subfolders = sorted(
-            [f for f in os.listdir(input_dir)
-             if os.path.isdir(os.path.join(input_dir, f)) and f.isdigit()],
-            key=lambda x: int(x)
-        )
+        time.sleep(0.25)
 
-        unprocessed = [f for f in subfolders if f not in processed_folders]
-
-        if not unprocessed:
-            time.sleep(3)
+        if current_p.time_pos is None or current_p.duration is None:
             continue
 
-        folder = unprocessed[0]
-        folder_path = os.path.join(input_dir, folder)
+        remaining = current_p.duration - current_p.time_pos
 
-        wav_files = sorted(
-            [os.path.join(folder_path, f)
-             for f in os.listdir(folder_path)
-             if f.lower().endswith(".wav")]
-        )
+        # ----------------------------
+        # ① 次曲を先読みロード（音量0）
+        #    ※ ここではフェードしない
+        # ----------------------------
+        preload_threshold = CROSSFADE_TIME + PRELOAD_MARGIN + 0.5
+        if (not next_loaded) and remaining <= preload_threshold:
+            req = pop_request()
 
-        if not wav_files:
-            processed_folders.add(folder)
-            continue
+            if req:
+                cand = find_track_by_name(req, tracks)
+                if cand is None:
+                    print(f"⚠ リクエスト不明（スキップ）: {req}")
+                    req = None
+                else:
+                    next_track = cand
+            if next_track is None:
+                index = (index + 1) % len(playlist)
+                next_track = playlist[index]
 
-        print(f"\n=== ミックス開始：{folder} ===")
+            print(f"📥 次曲ロード: {next_track.filename}")
 
-        combined = AudioSegment.from_file(wav_files[0])
+            next_p.play(next_track.filepath)
+            next_p.volume = 0
+            next_p.speed = 1.0
 
-        for f in wav_files[1:]:
-            next_audio = AudioSegment.from_file(f)
-            combined = combined.append(next_audio, crossfade=CROSSFADE)
+            # mpv が time_pos を持つまで少し待つ（デコード開始待ち）
+            for _ in range(30):
+                if next_p.time_pos is not None:
+                    break
+                time.sleep(0.05)
 
-        output_filename = f"mixtape_{folder}.wav"
-        output_path = os.path.join(output_dir, output_filename)
+            next_loaded = True
+            fading = False
 
-        combined.export(output_path, format="wav")
-        print(f"ミックス完了：{output_path}")
+        # ----------------------------
+        # ② フェード開始（本当に最後のCROSSFADE_TIMEだけ）
+        # ----------------------------
+        if next_loaded and (not fading) and remaining <= CROSSFADE_TIME:
+            fading = True
+            print("🔀 クロスフェード開始")
 
-        play_queue.put(output_path)
-        processed_folders.add(folder)
+            crossfade_simple(current_p, next_p, CROSSFADE_TIME, FADE_STEPS)
 
+            # デッキ入れ替え
+            old_p = current_p
+            current_p, next_p = next_p, old_p
+            current = next_track
 
-# ==========================================
-# メイン処理（30秒ごとにプレイリスト生成）
-# ==========================================
+            # 旧デッキ停止＆初期化
+            next_p.stop()
+            next_p.volume = 0
+            next_p.speed = 1.0
+
+            # 状態リセット（次の曲へ）
+            next_track = None
+            next_loaded = False
+            fading = False
+
+# ============================================================
+#  メイン
+# ============================================================
+
 if __name__ == "__main__":
-
-    analyzed_tracks = analyze_tracks(FOLDER_PATH)
-    if not analyzed_tracks:
-        print("曲がありません。終了します。")
+    tracks = analyze_tracks_with_cache(MUSIC_FOLDER)
+    if not tracks:
+        print("再生できる曲がありません")
         exit()
 
-    INPUT = os.path.join(BASE_OUTPUT_DIR, OUTPUT_FOLDER_NAME)
-    OUTPUT = os.path.join(BASE_OUTPUT_DIR, "processed")
-    os.makedirs(INPUT, exist_ok=True)
-    os.makedirs(OUTPUT, exist_ok=True)
+    start = random.choice(tracks)
+    playlist = sort_playlist(tracks, start)
+    save_playlist(playlist)
 
-    PLAY_QUEUE = Queue()
+    # CLI リクエスト受付を別スレッドで起動
+    threading.Thread(
+        target=cli_request_loop,
+        args=(tracks,),
+        daemon=True
+    ).start()
 
-    threading.Thread(target=play_music, args=(PLAY_QUEUE,), daemon=True).start()
-    threading.Thread(target=make_mix, args=(INPUT, OUTPUT, PLAY_QUEUE), daemon=True).start()
-
-    print("\n=== 自動ミックス生成システム 起動 ===")
-    print("30秒ごとに新しいミックスが生成されます。\n")
-
-    while True:
-        print("\n=== プレイリスト生成中 ===")
-        first_track = find_start_track(analyzed_tracks)
-        sorted_list = sort_playlist(analyzed_tracks, first_track)
-        export_results_numbered(sorted_list, FOLDER_PATH)
-        print("=== 完了：次の生成まで待機 ===")
-        time.sleep(PLAYLIST_INTERVAL)
+    dj_mix_mpv(playlist, tracks)
