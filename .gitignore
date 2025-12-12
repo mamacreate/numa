@@ -27,3 +27,4 @@ dist-ssr
 public/music/*
 public/Best_Mix_Numbered/*
 public/processed/*
+python/data/requests.json
