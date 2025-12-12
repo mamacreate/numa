@@ -4,7 +4,7 @@ import path from 'path';
 import { CONFIG } from './config.js';
 
 // JSONファイルのパス設定
-const REQUEST_FILE_DIR = path.join(process.cwd(), 'python/data');
+const REQUEST_FILE_DIR = path.join(process.cwd(), 'Python/data');
 const REQUEST_FILE_PATH = path.join(REQUEST_FILE_DIR, 'requests.json');
 
 // ★修正: シンプルな文字列リストとして保存する関数
